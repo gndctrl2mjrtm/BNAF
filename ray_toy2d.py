@@ -72,23 +72,23 @@ def _train_density_2d_worker(args, model, optimizer, scheduler, iterator):
 def train_density2d(model, optimizer, scheduler, args):
     iterator = trange(args.steps, smoothing=0, dynamic_ncols=True)
 
-    for epoch in iterator:
-        _train_density_2d_worker.remote(args, model, optimizer, scheduler, iterator)
     # for epoch in iterator:
-    #
-    #     x_mb = torch.from_numpy(sample2d(args.dataset, args.batch_dim)).float().to(args.device)
-    #
-    #     loss = - compute_log_p_x(model, x_mb).mean()
-    #
-    #     loss.backward()
-    #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
-    #
-    #     optimizer.step()
-    #     optimizer.zero_grad()
-    #
-    #     scheduler.step(loss)
-    #
-    #     iterator.set_postfix(loss='{:.2f}'.format(loss.data.cpu().numpy()), refresh=False)
+    #    _train_density_2d_worker.remote(args, model, optimizer, scheduler, iterator)
+    for epoch in iterator:
+
+        x_mb = torch.from_numpy(sample2d(args.dataset, args.batch_dim)).float().to(args.device)
+
+        loss = - compute_log_p_x(model, x_mb).mean()
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+        scheduler.step(loss)
+
+        iterator.set_postfix(loss='{:.2f}'.format(loss.data.cpu().numpy()), refresh=False)
 
 
 def compute_kl(model, args):
@@ -98,6 +98,18 @@ def compute_kl(model, args):
     x_mb, log_diag_j_mb = model(y_mb)
     log_p_y_mb = d_mb.log_prob(y_mb).sum(-1)
     return log_p_y_mb - log_diag_j_mb + energy2d(args.dataset, x_mb)         + (torch.relu(x_mb.abs() - 6) ** 2).sum(-1)
+
+@ray.remote
+def _compute_kl_worker(model_state, args):
+    model = create_model(args, verbose=True)
+    model.load_state_dict(model_state)
+    d_mb = torch.distributions.Normal(torch.zeros((args.batch_dim, 2)).to(args.device),
+                                      torch.ones((args.batch_dim, 2)).to(args.device))
+    y_mb = d_mb.sample()
+    x_mb, log_diag_j_mb = model(y_mb)
+    log_p_y_mb = d_mb.log_prob(y_mb).sum(-1)
+    model_state = model.state_dict()
+    return log_p_y_mb - log_diag_j_mb + energy2d(args.dataset, x_mb) + (torch.relu(x_mb.abs() - 6) ** 2).sum(-1), model_state
 
 
 def train_energy2d(model, optimizer, scheduler, args):
@@ -115,6 +127,26 @@ def train_energy2d(model, optimizer, scheduler, args):
         scheduler.step(loss)
 
         iterator.set_postfix(loss='{:.2f}'.format(loss.data.cpu().numpy()), refresh=False)
+
+def train_energy2d_distributed(model, optimizer, scheduler, args, batch=5):
+    iterator = trange(int(args.steps/batch), smoothing=0, dynamic_ncols=True)
+
+    model_state = model.state_dict()
+    for epoch in iterator:
+
+        loss = ray.get([_compute_kl_worker.remote(model, args) for _ in range(batch)])
+        loss = [l.mean() for l in loss]
+        for l in loss:
+            l.backward()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip_norm)
+
+            optimizer.step()
+            optimizer.zero_grad()
+
+            scheduler.step(loss)
+
+            iterator.set_postfix(loss='{:.2f}'.format(loss.data.cpu().numpy()), refresh=False)
 
 
 def load(model, optimizer, path):
@@ -238,7 +270,7 @@ def main():
     if args.experiment == 'density2d':
         train_density2d(model, optimizer, scheduler, args)
     elif args.experiment == 'energy2d':
-        train_energy2d(model, optimizer, scheduler, args)
+        train_energy2d_distributed(model, optimizer, scheduler, args)
 
     if args.save:
         print('Saving..')
