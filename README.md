@@ -86,3 +86,6 @@ For questions and comments, feel free to contact [Nicola De Cao](mailto:nicola.d
 
 ## License
 MIT
+
+
+python toy2d.py --dataset 8gaussians --experiment density2d  --flows 1 --layers 2 --hidden_dim 50 --save  --savefig 
